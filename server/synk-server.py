@@ -77,8 +77,96 @@ def init(args):
         usersfile.write('{"users": []}')
 
 
+class SSHServer(asyncssh.SSHServer):
+    def begin_auth(self, username):
+        return True
+
+    def password_auth_supported(self):
+        return True
+
+    def validate_password(self, username, password):
+        users = get_users()
+        for user in users:
+            if user["username"] == username and user["password"] == password:
+                return True
+        return False
+
+
+class SFTPServer(asyncssh.SFTPServer):
+    def __init__(self, chan, session, sftp_path):
+        self._root = str(sftp_path)
+        super().__init__(chan)
+
+    def _chroot(self, path):
+        # Ensure the path stays within the user's root directory
+        full_path = os.path.normpath(os.path.join(self._root, path.lstrip('/')))
+        if not full_path.startswith(self._root):
+            raise asyncssh.SFTPFailure("Access denied")
+        return full_path
+
+    async def open(self, path, pflags, attrs):
+        return await super().open(self._chroot(path), pflags, attrs)
+
+    async def opendir(self, path):
+        return await super().opendir(self._chroot(path))
+
+    async def stat(self, path):
+        return await super().stat(self._chroot(path))
+
+    async def lstat(self, path):
+        return await super().lstat(self._chroot(path))
+
+    async def remove(self, path):
+        return await super().remove(self._chroot(path))
+
+    async def rename(self, oldpath, newpath):
+        return await super().rename(self._chroot(oldpath), self._chroot(newpath))
+
+    async def mkdir(self, path, attrs):
+        return await super().mkdir(self._chroot(path), attrs)
+
+    async def rmdir(self, path):
+        return await super().rmdir(self._chroot(path))
+
+    async def realpath(self, path):
+        return path
+
+
+async def sftp_process_factory(conn, chan, env):
+    path, _ = get_config()
+
+    username = conn.get_extra_info('username')
+    user_info = None
+    for user in get_users():
+        if username == user["username"]:
+            user_info = user
+
+    if user_info is None:
+        raise asyncssh.PermissionDenied
+
+    root_dir = Path(path).joinpath(user_info["root"])
+
+    return SFTPServer(chan, conn, root_dir)
+
+
+async def start_sftp_server(port):
+    print("Attempting to start server.")
+
+    await asyncssh.listen(
+        '', port,
+        server_host_keys=['ssh_host_key'],
+        server_factory=SSHServer,
+        process_factory=sftp_process_factory,
+        sftp_factory=SFTPServer
+    )
+
+    print(f"SFTP server is running on port {port}.")
+    await asyncio.Event().wait()
+
+
 def start(args):
-    pass
+    _, port = get_config()
+    asyncio.run(start_sftp_server(port))
 
 
 def stop(args):
@@ -91,11 +179,24 @@ def user_list(args):
 
 
 def user_add(args):
+    path, _ = get_config()
+
     username = args.username or input("Username was not specified. Please enter the username for the new user\n> ")
     password = args.password or getpass.getpass("Password was not specified. Please enter the password for the new user\n> ")
+    if args.root is None:
+        root = input(f"Root was not specified. Please enter the root directory for the new user ({username})")
+        if root == "":
+            root = username
+    else:
+        root = args.root
+
+    root_path = Path(path).joinpath(root)
+    if not root_path.is_dir():
+        print("Given root directory does not exist, making new directory.")
+        root_path.mkdir(parents=True, exist_ok=True)
 
     users = get_users()
-    users.append({"username": username, "password": password})
+    users.append({"username": username, "password": password, "root": root})
 
     set_users(users)
 
@@ -132,6 +233,7 @@ parser_user_list.set_defaults(func=user_list)
 parser_user_add = subparsers_user.add_parser("add", help="Add a new user to the server")
 parser_user_add.add_argument("username", nargs="?", default=None, help="Set the username of the new user")
 parser_user_add.add_argument("password", nargs="?", default=None, help="Set the password of the new user")
+parser_user_add.add_argument("root", nargs="?", default=None, help="Set the root directory for the new user")
 parser_user_add.set_defaults(func=user_add)
 
 parser_user_remove = subparsers_user.add_parser("remove", help="Remove an existing user from the server")

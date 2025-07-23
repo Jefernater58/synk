@@ -3,3 +3,5 @@ server/testing
 client/config.ini
 server/config.ini
 server/users.json
+server/ssh_host_key
+server/ssh_host_key.pub

@@ -6,22 +6,25 @@ import paramiko
 
 
 class SFTPClient:
-    def __init__(self):
-        self.client = paramiko.SSHClient()
-        self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    def __init__(self, remote, port):
+        """self.client = paramiko.SSHClient()
+        self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())"""
+        self.transport = paramiko.Transport((remote, int(port)))
         self.sftp = None
 
-    def connect(self, remote, port, username, password):
+    def connect(self, username, password):
         try:
-            self.client.connect(remote, port=port, username=username, password=password)
-            self.sftp = self.client.open_sftp()
+            """self.client.connect(remote, port=port, username=username, password=password)
+            self.sftp = self.client.open_sftp()"""
+            self.transport.connect(username=username, password=password)
+            self.sftp = paramiko.SFTPClient.from_transport(self.transport)
         except Exception as e:
             print("Error: unable to connect to the SFTP server.\n" + str(e))
 
     def close(self):
         if self.sftp is not None:
             self.sftp.close()
-        self.client.close()
+        self.transport.close()
 
 
 def get_config():
@@ -84,8 +87,8 @@ def init(args):
 def push(args):
     path, remote, port, username, password = get_config()
 
-    client = SFTPClient()
-    client.connect(remote, port, username, password)
+    client = SFTPClient(remote, port)
+    client.connect(username, password)
 
 
 def pull(args):
