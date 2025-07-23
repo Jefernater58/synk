@@ -2,23 +2,47 @@ import argparse
 import getpass
 import configparser
 from pathlib import Path
+import paramiko
+
+
+class SFTPClient:
+    def __init__(self):
+        self.client = paramiko.SSHClient()
+        self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        self.sftp = None
+
+    def connect(self, remote, port, username, password):
+        try:
+            self.client.connect(remote, port=port, username=username, password=password)
+            self.sftp = self.client.open_sftp()
+        except Exception as e:
+            print("Error: unable to connect to the SFTP server.\n" + str(e))
+
+    def close(self):
+        if self.sftp is not None:
+            self.sftp.close()
+        self.client.close()
 
 
 def get_config():
-    try:
-        config = configparser.ConfigParser()
-        config.read('config.ini')
+    if Path("config.ini").is_file():
+        try:
+            config = configparser.ConfigParser()
+            config.read('config.ini')
 
-        path = config.get('general', 'path')
-        remote = config.get('general', 'remote')
-        port = config.get('general', 'port')
-        username = config.get('auth', 'username')
-        password = config.get('auth', 'password')
-    except configparser.Error as e:
-        print("Error: missing or invalid config.ini. Maybe try 'synk init'.\n" + str(e))
-        exit()
+            path = config.get('general', 'path')
+            remote = config.get('general', 'remote')
+            port = config.get('general', 'port')
+            username = config.get('auth', 'username')
+            password = config.get('auth', 'password')
+        except configparser.Error as e:
+            print("Error: invalid or incomplete config file. Maybe try 'synk init' first.\n" + str(e))
+            exit(1)
 
-    return path, remote, port, username, password
+        return path, remote, port, username, password
+
+    print("Error: config file does not exist. Maybe try 'synk init' first.")
+    exit(1)
 
 
 def init(args):
@@ -60,8 +84,8 @@ def init(args):
 def push(args):
     path, remote, port, username, password = get_config()
 
-    # do the sftp stuff here :)
-    print(path, remote, port, username, password)
+    client = SFTPClient()
+    client.connect(remote, port, username, password)
 
 
 def pull(args):
@@ -75,13 +99,11 @@ def status(args):
     print("status", args)
 
 
-# parse args
 parser = argparse.ArgumentParser(prog="synk", description="Back up your files to your own server with ease.")
-subparsers = parser.add_subparsers(title='Commands', dest='command')
-subparsers.required = True
+subparsers = parser.add_subparsers(title='Commands', dest='command', required=True)
 
 parser_init = subparsers.add_parser('init', help='Initialize the client')
-parser_init.add_argument('path', nargs="?", default=None, help='Local folder path to sync')
+parser_init.add_argument('path', nargs="?", default=None, help='Local path to sync')
 parser_init.add_argument('remote', nargs="?", default=None, help='Remote location (SFTP server address)')
 parser_init.add_argument('port', nargs="?", default=None, help='The port the remote is hosted on')
 parser_init.add_argument('username', nargs="?", default=None, help='The username for the SFTP server')
