@@ -1,6 +1,8 @@
 import argparse
 import getpass
 import configparser
+import json
+import hashlib
 from pathlib import Path
 import ftplib
 
@@ -23,6 +25,38 @@ class FTPClient:
         except Exception as e:
             print("[!] Error: an unknown error has occurred when connecting to the server.\n" + str(e))
         exit(1)
+
+    def upload(self, local_filepath, remote_filepath):
+        # TODO if there is a dir on remote of same name, delete that first
+        self.ensure_remote_dirs(remote_filepath)
+        with open(local_filepath, 'rb') as f:
+            self.ftps.storbinary(f'STOR {remote_filepath}', f)
+
+    def download(self, remote_filepath, local_filepath):
+        with open(local_filepath, 'wb') as f:
+            self.ftps.retrbinary(f'RETR {remote_filepath}', f.write)
+
+    def delete(self, remote_filepath):
+        self.ftps.delete(remote_filepath)
+
+    def delete_dir(self, remote_path):
+        self.ftps.rmd(remote_path)
+
+    def make_dir(self, remote_path):
+        self.ensure_remote_dirs(remote_path)
+        try:
+            self.ftps.mkd(remote_path)
+        except ftplib.error_perm:
+            pass
+
+    def ensure_remote_dirs(self, remote_filepath):
+        dirs = Path(remote_filepath).parent.parts
+        for i in range(1, len(dirs) + 1):
+            path = '/'.join(dirs[:i])
+            try:
+                self.ftps.mkd(path)
+            except Exception:
+                pass
 
     def close(self):
         self.ftps.quit()
@@ -87,15 +121,98 @@ def init(args):
     print("[.] synk has been successfully initialised.")
 
 
+def generate_file_hashes(path):
+    file_dict = {}
+    for directory, subdirectories, files in Path(path).walk():
+        for file in files:
+            h = hashlib.sha256()
+            absolute = str(directory.joinpath(file))
+
+            with open(absolute, 'rb') as f:
+                while chunk := f.read(8192):
+                    h.update(chunk)
+
+            relative = Path(absolute).relative_to(path).as_posix()
+            file_dict[relative] = h.hexdigest()
+
+    return file_dict
+
+
+def get_all_dirs(path):
+    dirs = []
+    for directory, _, _ in Path(path).walk():
+        if Path(path) == Path(directory):
+            continue
+        dirs.append(Path(directory).relative_to(path).as_posix())
+
+    return dirs
+
+
 def push(args):
     path, remote, port, username, password = get_config()
+    path_obj = Path(path)
+
+    print("[.] checking files to push...")
+    new_file_hashes = generate_file_hashes(path)
+
+    if not Path("index.json").is_file():
+        print("[.] First use detected, pushing all files to remote.")
+        edited_files = []
+        deleted_files = []
+        new_files = list(new_file_hashes.keys())
+
+        new_dirs = get_all_dirs(path)
+        current_dirs = new_dirs
+        deleted_dirs = []
+
+    else:
+        with open("index.json", "r") as indexfile:
+            data = json.load(indexfile)
+            old_file_hashes = data["files"]
+            old_dirs = data["dirs"]
+
+        edited_files = []
+        deleted_files = []
+        new_files = []
+        for file in old_file_hashes.keys():
+            if file in new_file_hashes:
+                if old_file_hashes[file] != new_file_hashes[file]:
+                    edited_files.append(file)
+            else:
+                deleted_files.append(file)
+        for file in new_file_hashes.keys():
+            if file not in old_file_hashes:
+                new_files.append(file)
+
+        current_dirs = get_all_dirs(path)
+        new_dirs = []
+        for d in current_dirs:
+            if d not in old_dirs:
+                new_dirs.append(d)
+        deleted_dirs = []
+        for d in old_dirs:
+            if d not in current_dirs:
+                deleted_dirs.append(d)
+
+    with open("index.json", "w") as indexfile:
+        json.dump({"files": new_file_hashes, "dirs": current_dirs}, indexfile)
 
     print("[.] Attempting to connect to the server...")
     client = FTPClient()
     client.connect(remote, int(port), username, password)
     print("[.] Connection established.")
 
-    # in order to keep track of changes, i will store filenames in a file along with a hash
+    for d in new_dirs:
+        client.make_dir(d)
+
+    for file in new_files + edited_files:
+        client.upload(str(path_obj.joinpath(file).as_posix()), file)
+
+    for file in deleted_files:
+        client.delete(file)
+
+    for d in deleted_dirs:
+        client.delete_dir(d)
 
     print("[.] Closing connection to the server...")
     client.close()

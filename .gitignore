@@ -1,6 +1,7 @@
 client/testing
 server/testing
 client/config.ini
+client/index.json
 server/config.ini
 server/users.json
 server/cert.pem
