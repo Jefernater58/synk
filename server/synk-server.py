@@ -1,5 +1,4 @@
 import asyncio
-import asyncssh
 import configparser
 import getpass
 import argparse
@@ -7,6 +6,11 @@ import tabulate
 import json
 from pathlib import Path
 import os
+import socket
+import paramiko
+from paramiko import SFTPServerInterface, SFTPAttributes, SFTPHandle
+from paramiko.common import AUTH_SUCCESSFUL, AUTH_FAILED, OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED, OPEN_SUCCEEDED
+from paramiko import ServerInterface
 
 
 def get_config():
@@ -77,96 +81,108 @@ def init(args):
         usersfile.write('{"users": []}')
 
 
-class SSHServer(asyncssh.SSHServer):
-    def begin_auth(self, username):
-        return True
+host_key = paramiko.RSAKey(filename='test_rsa.key')
 
-    def password_auth_supported(self):
-        return True
 
-    def validate_password(self, username, password):
+class StubServer(ServerInterface):
+    def check_auth_password(self, username, password):
         users = get_users()
         for user in users:
             if user["username"] == username and user["password"] == password:
-                return True
+                return AUTH_SUCCESSFUL
+        return AUTH_FAILED
+
+    def get_allowed_auths(self, username):
+        return "password"
+
+    def check_channel_request(self, kind, chanid):
+        if kind == "session":
+            return OPEN_SUCCEEDED
+        return OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
+
+    def check_channel_subsystem_request(self, channel, name):
+        if name == "sftp":
+            return True
         return False
 
 
-class SFTPServer(asyncssh.SFTPServer):
-    def __init__(self, chan, session, sftp_path):
-        self._root = str(sftp_path)
-        super().__init__(chan)
+class StubSFTPHandle(SFTPHandle):
+    def read(self, offset, length):
+        self.file.seek(offset)
+        return self.file.read(length)
 
-    def _chroot(self, path):
-        # Ensure the path stays within the user's root directory
-        full_path = os.path.normpath(os.path.join(self._root, path.lstrip('/')))
-        if not full_path.startswith(self._root):
-            raise asyncssh.SFTPFailure("Access denied")
-        return full_path
-
-    async def open(self, path, pflags, attrs):
-        return await super().open(self._chroot(path), pflags, attrs)
-
-    async def opendir(self, path):
-        return await super().opendir(self._chroot(path))
-
-    async def stat(self, path):
-        return await super().stat(self._chroot(path))
-
-    async def lstat(self, path):
-        return await super().lstat(self._chroot(path))
-
-    async def remove(self, path):
-        return await super().remove(self._chroot(path))
-
-    async def rename(self, oldpath, newpath):
-        return await super().rename(self._chroot(oldpath), self._chroot(newpath))
-
-    async def mkdir(self, path, attrs):
-        return await super().mkdir(self._chroot(path), attrs)
-
-    async def rmdir(self, path):
-        return await super().rmdir(self._chroot(path))
-
-    async def realpath(self, path):
-        return path
+    def write(self, offset, data):
+        self.file.seek(offset)
+        self.file.write(data)
+        return len(data)
 
 
-async def sftp_process_factory(conn, chan, env):
-    path, _ = get_config()
+class SimpleSFTPServer(SFTPServerInterface):
+    def __init__(self, server, *args, **kwargs):
+        print(args, kwargs)
+        self.root = os.path.abspath("sftp_root")
+        os.makedirs(self.root, exist_ok=True)
+        super().__init__(server, *args, **kwargs)
 
-    username = conn.get_extra_info('username')
-    user_info = None
-    for user in get_users():
-        if username == user["username"]:
-            user_info = user
+    def _abs_path(self, path):
+        abs_path = os.path.normpath(os.path.join(self.root, path.lstrip('/')))
+        if not abs_path.startswith(self.root):
+            raise IOError("Permission denied")
+        return abs_path
 
-    if user_info is None:
-        raise asyncssh.PermissionDenied
+    def list_folder(self, path):
+        real_path = self._abs_path(path)
+        file_list = []
+        for name in os.listdir(real_path):
+            attr = SFTPAttributes.from_stat(os.stat(os.path.join(real_path, name)))
+            attr.filename = name
+            file_list.append(attr)
+        return file_list
 
-    root_dir = Path(path).joinpath(user_info["root"])
+    def stat(self, path):
+        return SFTPAttributes.from_stat(os.stat(self._abs_path(path)))
 
-    return SFTPServer(chan, conn, root_dir)
+    def lstat(self, path):
+        return self.stat(path)
+
+    def open(self, path, flags, attr):
+        real_path = self._abs_path(path)
+        mode = 'r+b' if os.path.exists(real_path) else 'w+b'
+        f = open(real_path, mode)
+        handle = StubSFTPHandle(flags)
+        handle.file = f
+        return handle
 
 
-async def start_sftp_server(port):
-    print("Attempting to start server.")
+def start_sftp_server(port):
+    sock = socket.socket()
+    sock.bind(('0.0.0.0', port))  # Change port as needed
+    sock.listen(100)
+    print(f"Listening for connection on port {port}...")
 
-    await asyncssh.listen(
-        '', port,
-        server_host_keys=['ssh_host_key'],
-        server_factory=SSHServer,
-        process_factory=sftp_process_factory,
-        sftp_factory=SFTPServer
-    )
+    while True:
+        client, addr = sock.accept()
+        print(f"Connection from {addr}")
 
-    print(f"SFTP server is running on port {port}.")
-    await asyncio.Event().wait()
+        transport = paramiko.Transport(client)
+        transport.add_server_key(host_key)
+
+        server = StubServer()
+        try:
+            transport.start_server(server=server)
+
+            chan = transport.accept()
+            if chan is None:
+                continue
+
+            transport.set_subsystem_handler("sftp", paramiko.SFTPServer, SimpleSFTPServer)
+        except Exception as e:
+            print(f"Server error: {e}")
 
 
 def start(args):
     _, port = get_config()
-    asyncio.run(start_sftp_server(port))
+    start_sftp_server(int(port))
 
 
 def stop(args):

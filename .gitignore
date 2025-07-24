@@ -5,3 +5,5 @@ server/config.ini
 server/users.json
 server/ssh_host_key
 server/ssh_host_key.pub
+server/test_rsa.key
+server/test_rsa.key.pub
