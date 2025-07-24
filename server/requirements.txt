@@ -1,2 +1,4 @@
-asyncssh
+pyftpdlib
+cryptography
 tabulate
+pyOpenSSL

@@ -2,29 +2,30 @@ import argparse
 import getpass
 import configparser
 from pathlib import Path
-import paramiko
+import ftplib
 
 
-class SFTPClient:
-    def __init__(self, remote, port):
-        """self.client = paramiko.SSHClient()
-        self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())"""
-        self.transport = paramiko.Transport((remote, int(port)))
-        self.sftp = None
+class FTPClient:
+    def __init__(self):
+        self.ftps = ftplib.FTP_TLS()
 
-    def connect(self, username, password):
+    def connect(self, remote, port, username, password):
         try:
-            """self.client.connect(remote, port=port, username=username, password=password)
-            self.sftp = self.client.open_sftp()"""
-            self.transport.connect(username=username, password=password)
-            self.sftp = paramiko.SFTPClient.from_transport(self.transport)
+            self.ftps.connect(remote, port)
+            self.ftps.auth()
+            self.ftps.prot_p()
+            self.ftps.login(username, password)
+            return
+        except ConnectionRefusedError as e:
+            print("[!] Error: the server refused connection. Make sure the remote address and port are correct, and the server is up.\n" + str(e))
+        except ftplib.error_perm as e:
+            print("[!] Error: authentication failed, the username does not exist or the password is incorrect.\n" + str(e))
         except Exception as e:
-            print("Error: unable to connect to the SFTP server.\n" + str(e))
+            print("[!] Error: an unknown error has occurred when connecting to the server.\n" + str(e))
+        exit(1)
 
     def close(self):
-        if self.sftp is not None:
-            self.sftp.close()
-        self.transport.close()
+        self.ftps.quit()
 
 
 def get_config():
@@ -39,43 +40,43 @@ def get_config():
             username = config.get('auth', 'username')
             password = config.get('auth', 'password')
         except configparser.Error as e:
-            print("Error: invalid or incomplete config file. Maybe try 'synk init' first.\n" + str(e))
+            print("[!] Error: invalid or incomplete config file. Maybe try 'synk init' first.\n" + str(e))
             exit(1)
 
         return path, remote, port, username, password
 
-    print("Error: config file does not exist. Maybe try 'synk init' first.")
+    print("[!] Error: config file does not exist. Maybe try 'synk init' first.")
     exit(1)
 
 
 def init(args):
     if args.path is None:
         path = Path(
-            input("Local path was not specified. Please specify the local path to sync its contents with remote.\n> "))
+            input("[?] Local path was not specified. Please specify the path to use as the root for FTP users.\n> "))
     else:
         path = Path(args.path)
     # make the path absolute and resolve symlinks
     path = path.resolve(strict=False)
     # create the directory if it doesn't exist
     if not path.is_dir():
-        print("Given directory does not exist, making new directory.")
+        print("[.] Given directory does not exist, making new directory.")
         path.mkdir(parents=True, exist_ok=True)
 
-    remote = args.remote or input("Remote was not specified. Please enter the address of the SFTP server\n> ")
+    remote = args.remote or input("[?] Remote was not specified. Please enter the address of the FTP server.\n> ")
 
     if args.port is None:
-        port = input("Port was not specified. Please enter the port of the SFTP server (22)\n> ")
+        port = input("[?] Port was not specified. Please enter the port of the FTP server. (22)\n> ")
         port = port if port != "" else "22"
     else:
         port = args.port
     # check the port is an integer
     if not port.isdigit() or not 1 <= int(port) <= 65535:
-        print("The port must be a numerical value 1-65535.")
+        print("[!] Error: The port must be a numerical value 1-65535.")
         return
 
-    username = args.username or input("Username was not specified. Please enter the username for the SFTP server\n> ")
+    username = args.username or input("[?] Username was not specified. Please enter the username for the FTP server.\n> ")
     password = args.password or getpass.getpass(
-        "Password was not specified. Please enter the password for the SFTP server\n> ")
+        "[?] Password was not specified. Please enter the password for the FTP server.\n> ")
 
     config = configparser.ConfigParser()
     config['general'] = {'path': path, 'remote': remote, 'port': port}
@@ -83,18 +84,28 @@ def init(args):
     with open('config.ini', 'w') as configfile:
         config.write(configfile)
 
+    print("[.] synk has been successfully initialised.")
+
 
 def push(args):
     path, remote, port, username, password = get_config()
 
-    client = SFTPClient(remote, port)
-    client.connect(username, password)
+    print("[.] Attempting to connect to the server...")
+    client = FTPClient()
+    client.connect(remote, int(port), username, password)
+    print("[.] Connection established.")
+
+    # in order to keep track of changes, i will store filenames in a file along with a hash
+
+    print("[.] Closing connection to the server...")
+    client.close()
+    print("[.] Push operation completed successfully.")
 
 
 def pull(args):
     path, remote, port, username, password = get_config()
 
-    # do the sftp stuff here :)
+    # do the FTP stuff here :)
     print(path, remote, port, username, password)
 
 
@@ -107,10 +118,10 @@ subparsers = parser.add_subparsers(title='Commands', dest='command', required=Tr
 
 parser_init = subparsers.add_parser('init', help='Initialize the client')
 parser_init.add_argument('path', nargs="?", default=None, help='Local path to sync')
-parser_init.add_argument('remote', nargs="?", default=None, help='Remote location (SFTP server address)')
+parser_init.add_argument('remote', nargs="?", default=None, help='Remote location (FTP server address)')
 parser_init.add_argument('port', nargs="?", default=None, help='The port the remote is hosted on')
-parser_init.add_argument('username', nargs="?", default=None, help='The username for the SFTP server')
-parser_init.add_argument('password', nargs="?", default=None, help='The password for the SFTP server')
+parser_init.add_argument('username', nargs="?", default=None, help='The username for the FTP server')
+parser_init.add_argument('password', nargs="?", default=None, help='The password for the FTP server')
 parser_init.set_defaults(func=init)
 
 parser_push = subparsers.add_parser('push', help='Push changes to remote')
