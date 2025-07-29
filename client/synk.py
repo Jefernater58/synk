@@ -27,7 +27,6 @@ class FTPClient:
         exit(1)
 
     def upload(self, local_filepath, remote_filepath):
-        # TODO if there is a dir on remote of same name, delete that first
         self.ensure_remote_dirs(remote_filepath)
         with open(local_filepath, 'rb') as f:
             self.ftps.storbinary(f'STOR {remote_filepath}', f)
@@ -40,14 +39,37 @@ class FTPClient:
         self.ftps.delete(remote_filepath)
 
     def delete_dir(self, remote_path):
+        try:
+            self.ftps.rmd(remote_path)
+        except ftplib.error_perm:
+            # dir is not empty
+            self.recursive_delete(remote_path)
+
+    def recursive_delete(self, remote_path):
+        # list all files and directories in the remote_path
+        try:
+            items = self.ftps.nlst(remote_path)
+        except ftplib.error_perm as e:
+            # directory is empty or does not exist
+            items = []
+
+        for item in items:
+            # skip the directory itself
+            if item == remote_path or item.rstrip('/') == remote_path.rstrip('/'):
+                continue
+            try:
+                # try to delete as a file
+                self.ftps.delete(str(Path(remote_path).joinpath(item)))
+            except ftplib.error_perm:
+                # if not a file, it's a directory; recurse
+                self.recursive_delete(str(Path(remote_path).joinpath(item)))
+
+        # Now delete the (now empty) directory itself
         self.ftps.rmd(remote_path)
 
     def make_dir(self, remote_path):
         self.ensure_remote_dirs(remote_path)
-        try:
-            self.ftps.mkd(remote_path)
-        except ftplib.error_perm:
-            pass
+        self.ftps.mkd(remote_path)
 
     def ensure_remote_dirs(self, remote_filepath):
         dirs = Path(remote_filepath).parent.parts
@@ -150,69 +172,101 @@ def get_all_dirs(path):
 
 def push(args):
     path, remote, port, username, password = get_config()
-    path_obj = Path(path)
 
     print("[.] checking files to push...")
-    new_file_hashes = generate_file_hashes(path)
 
+    # generate all current file hashes and get all dirs
+    current_file_hashes = generate_file_hashes(path)
+    current_dirs = get_all_dirs(path)
+
+    files_to_push = []
+    files_to_delete = []
+
+    dirs_to_create = []
+    dirs_to_delete = []
+
+    # if no index file, push everything
     if not Path("index.json").is_file():
-        print("[.] First use detected, pushing all files to remote.")
-        edited_files = []
-        deleted_files = []
-        new_files = list(new_file_hashes.keys())
-
-        new_dirs = get_all_dirs(path)
-        current_dirs = new_dirs
-        deleted_dirs = []
+        print("[.] first time use detected, pushing all contents...")
+        files_to_push = list(current_file_hashes.keys())
+        dirs_to_create = current_dirs
 
     else:
+        # get data from index.json
         with open("index.json", "r") as indexfile:
             data = json.load(indexfile)
             old_file_hashes = data["files"]
             old_dirs = data["dirs"]
 
-        edited_files = []
-        deleted_files = []
-        new_files = []
-        for file in old_file_hashes.keys():
-            if file in new_file_hashes:
-                if old_file_hashes[file] != new_file_hashes[file]:
-                    edited_files.append(file)
-            else:
-                deleted_files.append(file)
-        for file in new_file_hashes.keys():
-            if file not in old_file_hashes:
-                new_files.append(file)
+        # get all the files that have been changed, or are new
+        for file in current_file_hashes.keys():
+            # if the file has changed or is new
+            if (file in old_file_hashes and current_file_hashes[file] != old_file_hashes[file]) or file not in old_file_hashes:
+                files_to_push.append(file)
 
-        current_dirs = get_all_dirs(path)
-        new_dirs = []
-        for d in current_dirs:
-            if d not in old_dirs:
-                new_dirs.append(d)
-        deleted_dirs = []
-        for d in old_dirs:
-            if d not in current_dirs:
-                deleted_dirs.append(d)
+        # get all files that have been deleted
+        for file in old_file_hashes.keys():
+            # if the file does not exist
+            if file not in current_file_hashes:
+                files_to_delete.append(file)
+
+        # get all the dirs that are new
+        for directory in current_dirs:
+            if directory not in old_dirs:
+                dirs_to_create.append(directory)
+
+        # get all the dirs that are deleted
+        for directory in old_dirs:
+            if directory not in current_dirs:
+                dirs_to_delete.append(directory)
 
     with open("index.json", "w") as indexfile:
-        json.dump({"files": new_file_hashes, "dirs": current_dirs}, indexfile)
+        json.dump({"files": current_file_hashes, "dirs": current_dirs}, indexfile)
+
+    # keep only deepest dirs in dirs_to_create, and remove any dir if a file to push is inside it
+    filtered_dirs = []
+    for directory in dirs_to_create:
+        # skip this dir if any file to push is inside it (or is the dir itself)
+        if any(Path(f).is_relative_to(directory) for f in files_to_push):
+            continue
+        if not any(
+            other != directory and Path(other).is_relative_to(directory)
+            for other in dirs_to_create
+        ):
+            filtered_dirs.append(directory)
+    dirs_to_create[:] = filtered_dirs
+
+    # keep only shallowest directories in dirs_to_delete
+    filtered_delete_dirs = []
+    for directory in dirs_to_delete:
+        if not any(
+            other != directory and Path(directory).is_relative_to(other)
+            for other in dirs_to_delete
+        ):
+            filtered_delete_dirs.append(directory)
+    dirs_to_delete[:] = filtered_delete_dirs
+
+    # remove files from files_to_delete that are inside any dir to delete
+    files_to_delete[:] = [
+        f for f in files_to_delete
+        if not any(Path(f).is_relative_to(dir_) for dir_ in dirs_to_delete)
+    ]
 
     print("[.] Attempting to connect to the server...")
     client = FTPClient()
     client.connect(remote, int(port), username, password)
-    print("[.] Connection established.")
 
-    for d in new_dirs:
-        client.make_dir(d)
-
-    for file in new_files + edited_files:
-        client.upload(str(path_obj.joinpath(file).as_posix()), file)
-
-    for file in deleted_files:
+    print("[.] Pushing to remote...")
+    for directory in dirs_to_delete:
+        client.delete_dir(directory)
+    for file in files_to_delete:
         client.delete(file)
 
-    for d in deleted_dirs:
-        client.delete_dir(d)
+    for directory in dirs_to_create:
+        client.make_dir(directory)
+    local_path = Path(path)
+    for file in files_to_push:
+        client.upload(local_path.joinpath(file), file)
 
     print("[.] Closing connection to the server...")
     client.close()
