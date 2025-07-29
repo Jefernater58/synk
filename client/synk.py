@@ -80,6 +80,11 @@ class FTPClient:
             except Exception:
                 pass
 
+    def get_remote_hash(self, remote_filepath):
+        resp = self.ftps.sendcmd(f"XHASH {remote_filepath}")
+        print("Server file SHA256:", resp.split()[1])
+        return resp
+
     def close(self):
         self.ftps.quit()
 
@@ -173,7 +178,7 @@ def get_all_dirs(path):
 def push(args):
     path, remote, port, username, password = get_config()
 
-    print("[.] checking files to push...")
+    print("[.] Checking files to push...")
 
     # generate all current file hashes and get all dirs
     current_file_hashes = generate_file_hashes(path)
@@ -276,8 +281,12 @@ def push(args):
 def pull(args):
     path, remote, port, username, password = get_config()
 
-    # do the FTP stuff here :)
-    print(path, remote, port, username, password)
+    print("[.] Attempting to connect to the server...")
+    client = FTPClient()
+    client.connect(remote, int(port), username, password)
+
+    print("[.] Pulling from remote...")
+    print(client.get_remote_hash("testing.sigma"))
 
 
 def status(args):

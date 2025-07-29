@@ -83,6 +83,12 @@ def init(args):
     print("[.] synk-server has been successfully initialised.")
 
 
+class MyFTPHandler(TLS_FTPHandler):
+    def ftp_XHASH(self, path):
+        print("hash command run!")
+        return self.respond("hello!")
+
+
 def start(args):
     path, port = get_config()
     users = get_users()
@@ -95,7 +101,7 @@ def start(args):
     for user in users:
         authorizer.add_user(user["username"], user["password"], ftp_root.joinpath(user["root"]), perm="elradfmwMT")
 
-    handler = TLS_FTPHandler
+    handler = MyFTPHandler
     handler.certfile = "cert.pem"
     handler.keyfile = "key.pem"
     handler.authorizer = authorizer
